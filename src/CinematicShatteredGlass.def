@@ -1,0 +1,15 @@
+LIBRARY CinematicShatteredGlass
+EXPORTS
+    FF_GetInfo            @1
+    FF_Initialise         @2
+    FF_Deinitialise       @3
+    FF_GetNumParameters   @4
+    FF_GetParameterName   @5
+    FF_GetParameterType   @6
+    FF_GetParameterDefault @7
+    FF_InstantiateGL      @8
+    FF_DeInstantiateGL    @9
+    FF_SetParameter       @10
+    FF_GetParameter       @11
+    FF_ProcessOpenGL      @12
+    FF_GetPluginCaps      @13

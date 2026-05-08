@@ -1,0 +1,160 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g. v1.0.2). Leave blank to skip creating a release.'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build Windows x64 DLL
+    runs-on: windows-latest
+
+    steps:
+    # ── 1. Checkout ────────────────────────────────────────────────────────────
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # ── 2. Configure with CMake ────────────────────────────────────────────────
+    - name: Configure CMake
+      run: |
+        cmake -B build -A x64 `
+              -DCMAKE_BUILD_TYPE=Release
+
+    # ── 3. Build ───────────────────────────────────────────────────────────────
+    - name: Build Release DLL
+      run: cmake --build build --config Release --parallel
+
+    # ── 4. Locate the DLL (handles flat or nested output paths) ───────────────
+    - name: Locate DLL
+      id: find_dll
+      shell: pwsh
+      run: |
+        $dll = Get-ChildItem -Recurse -Filter "CinematicShatteredGlass.dll" build/ |
+               Select-Object -First 1 -ExpandProperty FullName
+        if (-not $dll) {
+          Write-Error "DLL not found after build"
+          exit 1
+        }
+        echo "DLL found: $dll"
+        echo "dll_path=$dll" >> $env:GITHUB_OUTPUT
+
+        # Copy to a clean staging folder
+        New-Item -ItemType Directory -Force -Path staging | Out-Null
+        Copy-Item $dll staging/CinematicShatteredGlass.dll
+        echo "dll_size=$('{0:N0}' -f (Get-Item $dll).Length) bytes" >> $env:GITHUB_OUTPUT
+
+    # ── 5. Verify the DLL exports match what FFGL expects ─────────────────────
+    - name: Verify DLL exports
+      shell: pwsh
+      run: |
+        $required = @(
+          'FF_GetInfo','FF_Initialise','FF_Deinitialise',
+          'FF_GetNumParameters','FF_GetParameterName','FF_GetParameterType',
+          'FF_GetParameterDefault','FF_InstantiateGL','FF_DeInstantiateGL',
+          'FF_SetParameter','FF_GetParameter','FF_ProcessOpenGL','FF_GetPluginCaps'
+        )
+        $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+                     -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" 2>$null |
+                   Select-Object -First 1
+        if (-not $dumpbin) {
+          Write-Warning "dumpbin not found, skipping export check"
+          exit 0
+        }
+        $exports = & $dumpbin /EXPORTS staging/CinematicShatteredGlass.dll
+        $missing = @()
+        foreach ($fn in $required) {
+          if (-not ($exports -match [regex]::Escape($fn))) {
+            $missing += $fn
+          }
+        }
+        if ($missing.Count -gt 0) {
+          Write-Error "Missing FFGL exports: $($missing -join ', ')"
+          exit 1
+        }
+        Write-Host "All 13 FFGL exports verified OK"
+
+    # ── 6. Upload DLL as a workflow artifact (available on every build) ────────
+    - name: Upload DLL artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: CinematicShatteredGlass-Windows-x64
+        path: staging/CinematicShatteredGlass.dll
+        retention-days: 90
+
+    # ── 7. Build summary ──────────────────────────────────────────────────────
+    - name: Print build summary
+      shell: pwsh
+      run: |
+        $size = ${{ steps.find_dll.outputs.dll_size }}
+        Write-Host ""
+        Write-Host "╔══════════════════════════════════════════════════╗"
+        Write-Host "║  BUILD SUCCESSFUL                                 ║"
+        Write-Host "║  CinematicShatteredGlass.dll  ($size)   ║"
+        Write-Host "╚══════════════════════════════════════════════════╝"
+        Write-Host ""
+        Write-Host "→ Download from the Artifacts section of this run"
+        Write-Host "→ Copy to: Documents\Resolume Arena\Extra Effects\"
+
+  # ── Optional: create a GitHub Release with the DLL attached ─────────────────
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only run when triggered manually with a tag, or when a tag push is detected
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+
+    steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: CinematicShatteredGlass-Windows-x64
+        path: dist/
+
+    - name: Determine release tag
+      id: tag
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "tag=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+        else
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.tag.outputs.tag }}
+        name: "Cinematic Shattered Glass ${{ steps.tag.outputs.tag }}"
+        body: |
+          ## Cinematic Shattered Glass FFGL Plugin for Resolume
+
+          ### Install
+          1. Download `CinematicShatteredGlass.dll` below
+          2. Copy to `Documents\Resolume Arena\Extra Effects\` (or Avenue)
+          3. Restart Resolume → **Preferences → Video → Rescan**
+          4. Effect appears as **Shattered Glass** in the Effects panel
+
+          ### Parameters
+          Impact X/Y · Impact Force · Crack Spread · Radial Cracks · Stress Rings
+          Refraction Depth · Shard Separation · Edge Light · Chromatic · Dirt · Bloom
+          Animation Speed · Seed · Freeze
+
+          ### What's new in this build
+          - Physically-based straight-line cracks (not Voronoi curves)
+          - Crack branching with 2 secondaries per primary
+          - Per-shard Phong tilt + Fresnel specular rim
+          - Spall zone at impact epicentre
+          - Radial shard density falloff
+          - Conchoidal micro-texture on shard faces
+        files: dist/CinematicShatteredGlass.dll
+        draft: false
+        prerelease: false
